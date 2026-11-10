@@ -42,6 +42,7 @@ new type gets its own filter. Examples are in `agent/engines.example/`.
 | `unit` or `run` | Required, one of them. `unit`: a systemd service. `run`: `argv`, plus optional `cwd`, `env`, `memory_max`; the agent runs it as a transient service. |
 | `runtime`, `note` | Shown in the list. |
 | `port`, `url` | Running means this port answers. An IP in `url` is where the port is checked. |
+| `health_path` | Optional, with `port`. Running only when this path answers 2xx, e.g. `/health` for llama.cpp, which opens its port before the model is loaded. |
 | `exclusive` | Default `true`: needs the whole GPU, so Ollama and other exclusive engines stop first. |
 | `start_timeout` | Seconds until a start counts as failed (default 180). |
 | `models_dirs` | Folders whose large files count as this engine's models. |

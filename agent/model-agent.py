@@ -34,7 +34,7 @@ import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 MAX_BODY = 64 * 1024
 MAX_FINISHED_JOBS = 30
 MAX_DOWNLOADS = 3
@@ -97,6 +97,15 @@ def tcp_open(host: str, port: int) -> bool:
         with socket.create_connection((host, port), timeout=0.4):
             return True
     except OSError:
+        return False
+
+
+def http_ok(host: str, port: int, path: str) -> bool:
+    """True when GET path answers 2xx. llama.cpp answers 503 while loading."""
+    try:
+        with urllib.request.urlopen(f"http://{host}:{port}{path}", timeout=1.5) as resp:
+            return 200 <= resp.status < 300
+    except (OSError, ValueError):
         return False
 
 
@@ -231,6 +240,12 @@ def validate_engine(engine_id: str, raw: dict) -> dict:
         if not re.match(r"https?://[^\s/]+", url):
             raise AgentError("'url' must start with http:// or https://")
         engine["url"] = url
+    health = raw.get("health_path") or ""
+    if health and (not isinstance(health, str) or not re.fullmatch(r"/[A-Za-z0-9._~/?=&-]{0,120}", health)):
+        raise AgentError("'health_path' must be a path such as /health")
+    if health and engine["port"] is None:
+        raise AgentError("'health_path' needs 'port'")
+    engine["health_path"] = health
     timeout = raw.get("start_timeout", 180)
     if not isinstance(timeout, int) or not 5 <= timeout <= 1800:
         raise AgentError("'start_timeout' must be 5 to 1800 seconds")
@@ -276,6 +291,8 @@ def engine_states(engines: dict[str, dict]) -> dict[str, str]:
         unit_state = units.get(e["unit"], "inactive")
         if unit_state == "active":
             ready = e["port"] is None or tcp_open(engine_probe_host(e), e["port"])
+            if ready and e["port"] is not None and e["health_path"]:
+                ready = http_ok(engine_probe_host(e), e["port"], e["health_path"])
             states[eid] = "running" if ready else "starting"
         elif unit_state == "activating":
             states[eid] = "starting"

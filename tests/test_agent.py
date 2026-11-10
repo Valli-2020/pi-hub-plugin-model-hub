@@ -147,6 +147,38 @@ try:
     time.sleep(0.2)
     check("ollama restored after failed start", m.is_active("ollama.service"))
 
+    # Health path: an open port that still answers 503 is not ready yet
+    import http.server
+    health = {"code": 503}
+
+    class Health(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(health["code"] if self.path == "/health" else 404)
+            self.end_headers()
+
+        def log_message(self, *_a):
+            pass
+
+    hport = free_port()
+    hsrv = http.server.ThreadingHTTPServer(("127.0.0.1", hport), Health)
+    threading.Thread(target=hsrv.serve_forever, daemon=True).start()
+    m.write_engine("llm", {"name": "LLM", "type": "text", "unit": "llm.service",
+                           "port": hport, "health_path": "/health", "start_timeout": 10})
+    m.write_engine("bad-health", {"name": "Bad", "type": "text", "unit": "bh.service",
+                                  "port": hport, "health_path": "health"})
+    time.sleep(0.1)
+    check("bad health_path rejected", any("bad-health" in e for e in m.status()["catalog_errors"]))
+    code, res = m.call("POST", "/models/start", {"id": "engine:llm", "force": True})
+    job_id = res["job"]
+    time.sleep(1.5)
+    check("open port answering 503 is still starting", m.item("engine:llm")["state"] == "starting")
+    health["code"] = 200
+    check("ready once health answers 200", m.wait_job(job_id)["state"] == "done")
+    check("running after health ok", m.item("engine:llm")["state"] == "running")
+    code, res = m.call("POST", "/models/stop", {"id": "engine:llm"})
+    m.wait_job(res["job"])
+    hsrv.shutdown()
+
     # One switch at a time, input validation
     check("unknown engine", m.call("POST", "/models/start", {"id": "engine:nope"})[0] == 404)
     check("bad id", m.call("POST", "/models/start", {"id": "x"})[0] == 400)
