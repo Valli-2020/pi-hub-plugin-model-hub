@@ -34,7 +34,7 @@ import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.0.1"
+VERSION = "1.1.1"
 MAX_BODY = 64 * 1024
 MAX_FINISHED_JOBS = 30
 MAX_DOWNLOADS = 3
@@ -590,9 +590,28 @@ def restore_after_failure(engine: dict) -> None:
 
 
 def stop_ollama_model(job: dict, name: str) -> None:
-    res = run(["ollama", "stop", name], timeout=60)
-    if res.returncode != 0:
-        raise AgentError(res.stderr.strip()[:300] or "ollama stop failed", 500)
+    # Same request `ollama stop` sends, but over HTTP: the CLI panics when the
+    # service runs without $HOME.
+    try:
+        with ollama_request("/api/generate", {"model": name, "keep_alive": 0,
+                                              "stream": False}, 60) as r:
+            r.read()
+    except urllib.error.HTTPError as exc:
+        raise AgentError(f"Could not unload {name}: "
+                         f"{exc.read().decode(errors='replace')[:300]}", 500)
+    except OSError as exc:
+        raise AgentError(f"Could not unload {name}: {exc}", 500)
+    # Unloading finishes in the background; wait so the list is right at once.
+    jobs.update(job, message="Unloading")
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        try:
+            names = {m.get("name") for m in ollama_json("/api/ps").get("models") or []}
+        except (OSError, ValueError):
+            break
+        if name not in names:
+            break
+        time.sleep(0.5)
     jobs.finish(job, "done", "Unloaded")
 
 

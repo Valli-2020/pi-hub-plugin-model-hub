@@ -39,11 +39,10 @@ echo "$*" >> "$S/run.log"
 for a in "$@"; do case "$a" in --unit=*) touch "$S/active/${a#--unit=}" ;; esac; done
 """
 JOURNALCTL = '#!/bin/bash\necho "boom: out of memory"\n'
+# The agent must not need the CLI (it panics without $HOME): fail loudly if used.
 OLLAMA = r"""#!/bin/bash
-S=$FAKE_STATE
-echo "ollama $*" >> "$S/log"
-n=$(echo "$2" | tr ':/' '__')
-rm -f "$S/loaded/$n"
+echo "panic: \$HOME is not defined" >&2
+exit 2
 """
 
 MODELS = {
@@ -190,6 +189,14 @@ class FakeMachine:
                 elif self.path in ("/api/generate", "/api/embed"):
                     if body["model"].startswith("fail"):
                         self._json({"error": "out of memory"}, 500)
+                        return
+                    n = body["model"].replace(":", "_").replace("/", "_")
+                    if body.get("keep_alive") == 0 and not body.get("prompt"):
+                        try:
+                            os.remove(os.path.join(machine.state, "loaded", n))
+                        except FileNotFoundError:
+                            pass
+                        self._json({"done": True, "done_reason": "unload"})
                         return
                     if "embedding" in MODELS.get(body["model"], []) and self.path != "/api/embed":
                         self._json({"error": "does not support generate"}, 400)

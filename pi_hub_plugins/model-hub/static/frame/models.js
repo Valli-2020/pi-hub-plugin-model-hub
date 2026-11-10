@@ -256,7 +256,9 @@
     var t = Date.parse(String(item.until).replace(/(\.\d{3})\d+/, '$1'));
     var left = (t - Date.now()) / 60000;
     if (!(left > 0) || left > 24 * 60) return '';
-    return left < 1 ? 'unloads in under a minute' : 'unloads in ' + Math.round(left) + ' min';
+    if (left < 1) return 'unloads in under a minute';
+    if (left < 90) return 'unloads in ' + Math.round(left) + ' min';
+    return 'unloads in ' + Math.round(left / 60) + ' h';
   }
   function isSwitching() {
     return (data.jobs || []).some(function (j) {

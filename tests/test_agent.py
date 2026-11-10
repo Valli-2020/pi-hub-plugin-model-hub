@@ -73,6 +73,15 @@ try:
     code, res = m.call("POST", "/models/start", {"id": "ollama:embeddinggemma:latest"})
     check("embedding model loads through /api/embed", m.wait_job(res["job"])["state"] == "done")
 
+    # Stop goes over HTTP, not the CLI (which panics without $HOME)
+    code, res = m.call("POST", "/models/stop", {"id": "ollama:embeddinggemma:latest"})
+    job = m.wait_job(res["job"])
+    check("stopping an Ollama model unloads it", job["state"] == "done", job)
+    check("unloaded model shows as stopped",
+          m.item("ollama:embeddinggemma:latest")["state"] == "stopped")
+    code, res = m.call("POST", "/models/start", {"id": "ollama:embeddinggemma:latest"})
+    m.wait_job(res["job"])
+
     # Exclusive engine needs confirmation and displaces Ollama
     code, res = m.call("POST", "/models/start", {"id": "engine:comfy"})
     check("exclusive start asks first", code == 409 and "llama3.1:8b" in res["conflicts"], res)
