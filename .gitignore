@@ -1,0 +1,23 @@
+# Machine-specific engine configs (real addresses, paths)
+local/
+config.json
+.env*
+
+# Python / Node
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+node_modules/
+dist/
+build/
+*.egg-info/
+
+# Big files never belong here
+*.tar.gz
+*.zip
+*.gguf
+*.onnx
+*.safetensors
+*.bin
+*.png

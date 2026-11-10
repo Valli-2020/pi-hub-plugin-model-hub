@@ -1,0 +1,14 @@
+{
+  "name": "ComfyUI",
+  "type": "image",
+  "runtime": "ComfyUI",
+  "unit": "comfyui.service",
+  "port": 8188,
+  "url": "http://192.168.1.50:8188/",
+  "exclusive": true,
+  "models_dirs": ["/opt/comfyui/models/diffusion_models"],
+  "targets": [
+    {"label": "Diffusion models", "path": "/opt/comfyui/models/diffusion_models"},
+    {"label": "VAE", "path": "/opt/comfyui/models/vae"}
+  ]
+}

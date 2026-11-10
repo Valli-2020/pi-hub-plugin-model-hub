@@ -1,0 +1,13 @@
+{
+  "name": "model-hub",
+  "version": "1.0.0",
+  "description": "Start, stop, download and monitor every local AI model on a GPU machine: text, image, audio and anything you add",
+  "min_core_version": "8.0.0",
+  "plugin_api_version": 2,
+  "author": "Valli-2020",
+  "license": "MIT",
+  "capabilities": [
+    "ui.frame",
+    "hosts.wake"
+  ]
+}

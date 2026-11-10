@@ -1,0 +1,15 @@
+{
+  "name": "Speech server",
+  "type": "audio",
+  "runtime": "llama.cpp",
+  "note": "A command instead of a unit: the agent runs it as a transient service",
+  "run": {
+    "argv": ["/opt/tts/server", "--host", "0.0.0.0", "--port", "3030"],
+    "cwd": "/opt/tts",
+    "env": {"VK_DEVICE": "1"},
+    "memory_max": "12G"
+  },
+  "port": 3030,
+  "exclusive": false,
+  "start_timeout": 120
+}

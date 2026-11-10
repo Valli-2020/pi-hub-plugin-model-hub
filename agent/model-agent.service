@@ -1,0 +1,12 @@
+[Unit]
+Description=model-agent (model control for the Pi Hub model-hub plugin)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/lib/model-agent/model-agent.py --bind @BIND@ --port 9872
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
