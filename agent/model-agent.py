@@ -132,7 +132,9 @@ def dir_size_and_files(path: str) -> tuple[int, list[str]]:
         return 0, []
     for entry in entries:
         try:
-            if entry.is_file() and entry.stat().st_size > 1024 * 1024:
+            # A .part file is an unfinished download, not a model yet.
+            if (entry.is_file() and not entry.name.endswith(".part")
+                    and entry.stat().st_size > 1024 * 1024):
                 total += entry.stat().st_size
                 names.append(entry.name)
         except OSError:

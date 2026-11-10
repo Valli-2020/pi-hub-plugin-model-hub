@@ -219,7 +219,11 @@ try:
     check("no part file left", not os.path.exists(final + ".part"))
     check("existing file refused",
           m.call("POST", "/download", {"kind": "file", "url": url, "target": tid})[0] == 409)
-    check("files counted for the engine", m.item("engine:files")["files"] == ["model.gguf"])
+    with open(os.path.join(m.downloads, "next.gguf.part"), "wb") as handle:
+        handle.write(b"x" * (2 * 1024 * 1024))
+    check("files counted for the engine, unfinished downloads left out",
+          m.item("engine:files")["files"] == ["model.gguf"], m.item("engine:files")["files"])
+    os.remove(os.path.join(m.downloads, "next.gguf.part"))
 
     # Resume after a dropped connection
     m.file_stop_after = 500000
