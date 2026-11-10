@@ -49,7 +49,7 @@ _opener = urllib.request.build_opener(_NoRedirect)
 
 class ModelHubPlugin(Plugin):
     name = "model-hub"
-    version = "1.0.1"
+    version = "1.1.0"
     description = ("Start, stop, download and monitor every local AI model on "
                    "a GPU machine: text, image, audio and anything you add")
     min_core_version = "8.0.0"

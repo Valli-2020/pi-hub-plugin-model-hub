@@ -10,10 +10,16 @@
     running: 'Running', starting: 'Starting', stopping: 'Stopping',
     stopped: 'Stopped', failed: 'Failed', unavailable: 'Ollama is stopped'
   };
+  // What the badge next to each name says: can I use this model right now?
+  var PHASE_LABEL = {
+    ready: 'Ready', loading: 'Loading…', unloading: 'Unloading…',
+    off: 'Not loaded', failed: 'Failed', unavailable: 'Not loaded'
+  };
 
   var data = null, filter = 'all', timer = 0, busy = false, visible = true;
   var armed = {};            // key -> expiry
-  var pending = {};          // item id -> true while a click is in flight
+  var pending = {};          // item id -> 'start' | 'stop' while a click is in flight
+  var lastPhase = null;      // item id -> phase, to toast when a model turns ready
   var seenJobs = null;       // job id -> state, to toast each outcome once
   var listSig = '', jobSig = '', targetSig = '';
   var hist = { vram: [], busy: [] };
@@ -194,15 +200,15 @@
   }
   function refreshSoon() { schedule(FAST_MS); }
 
-  function act(id, path, body) {
-    pending[id] = true;
+  function act(id, path, body, kind) {
+    pending[id] = kind;
     listSig = '';
     drawList();
     return ph.call(path, { method: 'POST', body: body }).catch(fail)
       .then(function () { delete pending[id]; listSig = ''; refreshSoon(); });
   }
-  function start(item, force) { act(item.id, 'models/start', { id: item.id, force: !!force }); }
-  function stop(item) { act(item.id, 'models/stop', { id: item.id }); }
+  function start(item, force) { act(item.id, 'models/start', { id: item.id, force: !!force }, 'start'); }
+  function stop(item) { act(item.id, 'models/stop', { id: item.id }, 'stop'); }
 
   function button(label, cls, onClick, disabled) {
     var b = el('button', 'btn ' + (cls || ''), label);
@@ -235,6 +241,23 @@
       return j.state === 'running' && (j.kind === 'start' || j.kind === 'stop') && j.label === item.name;
     })[0];
   }
+  // ready | loading | unloading | off | failed | unavailable
+  function phase(item) {
+    var job = jobFor(item);
+    var kind = job ? job.kind : pending[item.id];
+    if (kind === 'start') return 'loading';
+    if (kind === 'stop') return 'unloading';
+    return { running: 'ready', starting: 'loading', stopping: 'unloading',
+             failed: 'failed', unavailable: 'unavailable' }[item.state] || 'off';
+  }
+  // Ollama unloads idle models on its own; say when.
+  function unloadsIn(item) {
+    if (!item.until) return '';
+    var t = Date.parse(String(item.until).replace(/(\.\d{3})\d+/, '$1'));
+    var left = (t - Date.now()) / 60000;
+    if (!(left > 0) || left > 24 * 60) return '';
+    return left < 1 ? 'unloads in under a minute' : 'unloads in ' + Math.round(left) + ' min';
+  }
   function isSwitching() {
     return (data.jobs || []).some(function (j) {
       return j.state === 'running' && (j.kind === 'start' || j.kind === 'stop');
@@ -264,11 +287,15 @@
   }
 
   function itemRow(item, switching) {
-    var row = el('div', 'row s-' + item.state);
+    var p = phase(item);
+    var row = el('div', 'row s-' + item.state + ' p-' + p);
     var head = el('div', 'row-main');
     var title = el('div', 'row-title');
     title.appendChild(el('span', 'dot'));
     title.appendChild(el('span', 'name', item.name));
+    var badge = el('span', 'badge', PHASE_LABEL[p]);
+    badge.setAttribute('role', 'status');
+    title.appendChild(badge);
     var main = el('div', 'row-meta');
     var bits = [capitalize(item.type), item.runtime];
     if (item.size) bits.push(bytes(item.size));
@@ -277,9 +304,13 @@
     head.appendChild(main);
 
     var job = jobFor(item);
-    var stateText = job ? (job.message || 'Working') : STATE_LABEL[item.state] || item.state;
-    if (item.vram) stateText += ' · ' + bytes(item.vram) + ' on GPU';
-    head.appendChild(el('div', 'row-state', stateText));
+    var state = [];
+    if (job) state.push(job.message || 'Working');
+    else if (p !== 'ready' && p !== 'off') state.push(STATE_LABEL[item.state] || item.state);
+    if (item.vram) state.push(bytes(item.vram) + ' on GPU');
+    if (p === 'ready') state.push(unloadsIn(item));
+    state = state.filter(Boolean);
+    if (state.length) head.appendChild(el('div', 'row-state', state.join(' · ')));
 
     var extra = [];
     if (item.detail) extra.push(item.detail);
@@ -317,7 +348,7 @@
 
   function drawList() {
     if (!data || !data.items) return;
-    var sig = JSON.stringify([filter, data.items, isAdmin(), Object.keys(pending),
+    var sig = JSON.stringify([filter, data.items, isAdmin(), pending, Math.floor(Date.now() / 60000),
       (data.jobs || []).filter(function (j) { return j.state === 'running' && j.kind !== 'pull' && j.kind !== 'file'; })
         .map(function (j) { return [j.label, j.message]; })]);
     if (sig === listSig) return;
@@ -492,6 +523,20 @@
     seenJobs = next;
   }
 
+  // Toast the moment a model turns ready, or drops out of memory.
+  function announceReady(items) {
+    var next = {};
+    items.forEach(function (item) {
+      var p = phase(item);
+      next[item.id] = p;
+      var before = lastPhase && lastPhase[item.id];
+      if (!before || before === p) return;
+      if (p === 'ready') ph.toast(item.name + ' is ready', 'ok');
+      else if (before === 'ready' && p === 'off') ph.toast(item.name + ' is no longer loaded', 'ok');
+    });
+    lastPhase = next;
+  }
+
   // ── Poll ──────────────────────────────────────────────────────────────
   function draw(d) {
     data = d;
@@ -516,6 +561,7 @@
     drawTargets(d.targets || []);
     drawJobs(d.jobs || []);
     announce(d.jobs || []);
+    announceReady(d.items || []);
   }
 
   function poll() {
@@ -525,8 +571,13 @@
       drawOffline({ error: (e && e.message) || 'Request failed' });
     }).then(function () {
       busy = false;
-      var hot = data && (data.jobs || []).some(function (j) { return j.state === 'running'; });
-      schedule(hot ? FAST_MS * 2 : POLL_MS);
+      var jobsNow = (data && data.jobs) || [];
+      // Poll every second while something loads, so "Ready" shows up right away.
+      var switching = data && data.items && (isSwitching() || data.items.some(function (i) {
+        return i.state === 'starting' || i.state === 'stopping';
+      }));
+      var hot = jobsNow.some(function (j) { return j.state === 'running'; });
+      schedule(switching ? FAST_MS : hot ? FAST_MS * 2 : POLL_MS);
     });
   }
   function schedule(ms) {

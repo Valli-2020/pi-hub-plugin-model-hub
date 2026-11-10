@@ -48,6 +48,9 @@ await a.frame.locator('.btn.chip', { hasText: 'All' }).click();
 await row(a.frame, 'llama3.1').locator('.btn.go').click();
 await row(a.frame, 'llama3.1').locator('.btn.stop').waitFor({ timeout: 10000 });
 check('model started from the button', (await row(a.frame, 'llama3.1').innerText()).includes('on GPU'));
+await row(a.frame, 'llama3.1').locator('.badge', { hasText: 'Ready' }).waitFor({ timeout: 8000 });
+check('loaded model shows the Ready badge', true);
+check('unloaded model shows Not loaded', (await row(a.frame, 'embeddinggemma').locator('.badge').innerText()) === 'Not loaded');
 
 // Engine needs a second click, and says why
 await row(a.frame, 'ComfyUI').locator('.btn.go').click();
@@ -64,7 +67,7 @@ if (SHOTS) await a.page.screenshot({ path: SHOTS + '/admin-dark.png', fullPage: 
 
 await row(a.frame, 'ComfyUI').locator('.btn.stop').click();
 await row(a.frame, 'ComfyUI').locator('.btn.go').waitFor({ timeout: 12000 });
-await row(a.frame, 'llama3.1').locator('.row-state', { hasText: 'Stopped' }).waitFor({ timeout: 8000 });
+await row(a.frame, 'llama3.1').locator('.badge', { hasText: 'Not loaded' }).waitFor({ timeout: 8000 });
 check('stopping the engine brings ollama back', true);
 
 // Download
