@@ -68,6 +68,17 @@ PYTHONPATH=<pi-hub checkout> python3 tests/harness.py fake x tests/browser.mjs  
 The browser test needs Playwright; set `PLAYWRIGHT_ROOT` to the folder that
 holds its `node_modules`.
 
+## Release assets
+
+Each GitHub release ships two assets:
+
+- `pihub-plugin.json`: the Pi Hub plugin manifest
+- `pi-hub-plugin-model-hub-<version>.tar.gz`: the plugin code (top-level dir
+  `pi_hub_plugins/model-hub/`)
+
+The agent is not part of the release asset. Copy `agent/` from the repository
+to the GPU machine.
+
 ## License
 
 MIT
