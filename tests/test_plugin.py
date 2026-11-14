@@ -37,7 +37,7 @@ def make(cfg=None):
     return p
 
 
-CORE_READY = "url" in getattr(contrib, "FIELD_TYPES", ())
+CORE_READY = "url" in getattr(contrib, "CONFIG_FIELD_TYPES", getattr(contrib, "FIELD_TYPES", ()))
 
 
 def test_schema_validates_and_defaults_coerce():
