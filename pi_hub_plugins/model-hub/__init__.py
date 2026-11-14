@@ -22,9 +22,9 @@ from pi_hub.plugins.base import FrameDef, Plugin, PluginContext, RouteDef
 
 log = logging.getLogger(__name__)
 
-STATUS_TTL_S = 2.0
-STATUS_TIMEOUT_S = 4
-ACTION_TIMEOUT_S = 15
+DEFAULTS = {"status_ttl_s": 2.0, "status_timeout_s": 4, "action_timeout_s": 15}
+NUM_LIMITS = {"status_ttl_s": (0, 60), "status_timeout_s": (1, 60),
+              "action_timeout_s": (1, 120)}
 JOB_ID_RE = re.compile(r"[a-f0-9]{1,32}")
 ENGINE_ID_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,40}")
 
@@ -49,10 +49,10 @@ _opener = urllib.request.build_opener(_NoRedirect)
 
 class ModelHubPlugin(Plugin):
     name = "model-hub"
-    version = "1.1.1"
+    version = "1.2.0"
     description = ("Start, stop, download and monitor every local AI model on "
                    "a GPU machine: text, image, audio and anything you add")
-    min_core_version = "8.0.0"
+    min_core_version = "8.3.0"
     plugin_api_version = 2
     capabilities = ["ui.frame", "hosts.wake"]
 
@@ -65,20 +65,52 @@ class ModelHubPlugin(Plugin):
 
     def get_config_schema(self) -> list[dict]:
         return [
-            {"name": "agent_url", "label": "Agent URL", "type": "text",
-             "required": True, "placeholder": "http://192.168.1.50:9872",
+            {"name": "agent_url", "label": "Agent URL", "type": "url",
+             "required": True, "section": "Agent",
+             "placeholder": "http://gpu-box.example.local:9872",
              "help": "Address of model-agent on the GPU machine."},
             {"name": "token", "label": "Agent token", "type": "password",
+             "section": "Agent",
              "help": "Contents of /etc/model-agent/token on the GPU machine. "
                      "Left blank keeps the current token."},
             {"name": "host_id", "label": "Pi Hub host id (for Wake)",
-             "type": "text", "placeholder": "gpu-box",
+             "type": "text", "section": "Wake", "placeholder": "gpu-box",
              "help": "Host with a MAC address in Pi Hub. Empty hides Wake."},
+            {"name": "status_ttl_s", "label": "Status cache (seconds)",
+             "type": "number", "section": "Timing", "default": DEFAULTS["status_ttl_s"],
+             "min": 0, "max": 60,
+             "help": "How long one status answer is reused for all viewers."},
+            {"name": "status_timeout_s", "label": "Status timeout (seconds)",
+             "type": "number", "section": "Timing",
+             "default": DEFAULTS["status_timeout_s"], "min": 1, "max": 60,
+             "help": "Give up on a status request after this long."},
+            {"name": "action_timeout_s", "label": "Action timeout (seconds)",
+             "type": "number", "section": "Timing",
+             "default": DEFAULTS["action_timeout_s"], "min": 1, "max": 120,
+             "help": "Give up on start, stop, download and engine requests "
+                     "after this long."},
         ]
+
+    def migrate_config(self, old_version: str, config: dict) -> dict:
+        cfg = dict(config or {})
+        for key in ("agent_url", "token", "host_id"):
+            if isinstance(cfg.get(key), str):
+                cfg[key] = cfg[key].strip()
+        if isinstance(cfg.get("agent_url"), str):
+            cfg["agent_url"] = cfg["agent_url"].rstrip("/")
+        return cfg
 
     def on_config_change(self, old: dict, new: dict) -> None:
         with self._cache_lock:
             self._cache = None
+
+    def _num(self, key: str) -> float:
+        lo, hi = NUM_LIMITS[key]
+        try:
+            value = float(self.ctx.get_config().get(key, DEFAULTS[key]))
+        except (TypeError, ValueError):
+            value = DEFAULTS[key]
+        return min(max(value, lo), hi)
 
     def get_routes(self) -> list[RouteDef]:
         admin = ["admin"]
@@ -139,7 +171,7 @@ class ModelHubPlugin(Plugin):
             return {"error": "The agent does not answer"}, 502
 
     def _forward(self, method: str, path: str, body: dict | None = None):
-        result = self._agent(method, path, body, ACTION_TIMEOUT_S)
+        result = self._agent(method, path, body, self._num("action_timeout_s"))
         with self._cache_lock:
             self._cache = None
         return result
@@ -148,9 +180,9 @@ class ModelHubPlugin(Plugin):
 
     def _snapshot(self) -> dict:
         with self._cache_lock:
-            if self._cache and time.monotonic() - self._cache[0] < STATUS_TTL_S:
+            if self._cache and time.monotonic() - self._cache[0] < self._num("status_ttl_s"):
                 return self._cache[1]
-            data, code = self._agent("GET", "/status", None, STATUS_TIMEOUT_S)
+            data, code = self._agent("GET", "/status", None, self._num("status_timeout_s"))
             snapshot: dict[str, Any]
             if code == 200:
                 snapshot = {"reachable": True, **data}

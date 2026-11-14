@@ -24,6 +24,17 @@ hardware, download new ones. Text, image, audio, video or anything else.
 3. **Configure**: agent URL `http://<bind-ip>:9872`, the token, and the Pi Hub
    host id for Wake (optional).
 
+| Setting | Section | Default | Meaning |
+|---|---|---|---|
+| `agent_url` | Agent | empty | Address of model-agent. |
+| `token` | Agent | empty | Agent token (secret). |
+| `host_id` | Wake | empty | Pi Hub host id to wake. Empty hides Wake. |
+| `status_ttl_s` | Timing | 2 | Seconds a status answer is reused. |
+| `status_timeout_s` | Timing | 4 | Status request timeout. |
+| `action_timeout_s` | Timing | 15 | Start, stop, download and engine request timeout. |
+
+Timing changes apply immediately. Requires Pi Hub 8.3.0.
+
 ## Adding new things
 
 | New thing | What to do |
