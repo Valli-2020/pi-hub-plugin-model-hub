@@ -1,4 +1,4 @@
-"""Fake machine for the tests: Ollama API, systemd tools and an HTTPS file server."""
+"""Fake machine for the tests: Ollama API, llama.cpp router, systemd tools and an HTTPS file server."""
 from __future__ import annotations
 
 import http.server
@@ -63,7 +63,8 @@ def _quiet(handler):
 
 
 class FakeMachine:
-    def __init__(self, engines: dict[str, dict] | None = None):
+    def __init__(self, engines: dict[str, dict] | None = None, ollama: bool = True,
+                 llama: bool = False):
         self.tmp = tempfile.TemporaryDirectory(prefix="model-hub-test-")
         self.dir = self.tmp.name
         self.state = os.path.join(self.dir, "state")
@@ -75,7 +76,10 @@ class FakeMachine:
         os.makedirs(os.path.join(self.etc, "engines.d"))
         os.makedirs(self.bin)
         os.makedirs(self.downloads)
-        open(os.path.join(self.state, "active", "ollama.service"), "w").close()
+        self.llama_models = os.path.join(self.dir, "llama-models")
+        os.makedirs(self.llama_models)
+        if ollama:
+            open(os.path.join(self.state, "active", "ollama.service"), "w").close()
         with open(os.path.join(self.etc, "token"), "w") as f:
             f.write(TOKEN)
         for name, body in (("systemctl", SYSTEMCTL), ("systemd-run", SYSTEMD_RUN),
@@ -96,13 +100,22 @@ class FakeMachine:
         self._ollama_srv = None
         self._stop = threading.Event()
         self._start_tls()
+        extra = [] if ollama else ["--ollama", "off"]
+        if llama:
+            # name -> [value, failed]; reload adds new *.gguf files from the folder.
+            self.llama: dict[str, list] = {"qwen-9b": ["unloaded", False],
+                                           "fail-big": ["unloaded", False]}
+            self.llama_requests: list[str] = []
+            self.llama_url = self._serve_llama()
+            extra += ["--llama", self.llama_url, "--llama-models", self.llama_models]
         threading.Thread(target=self._watch, daemon=True).start()
-        self._wait_port(self.ollama_port)
+        if ollama:
+            self._wait_port(self.ollama_port)
         env = dict(os.environ, PATH=self.bin + os.pathsep + os.environ["PATH"],
                    FAKE_STATE=self.state, SSL_CERT_FILE=self.cert)
         self.agent = subprocess.Popen(
             ["python3", AGENT, "--bind", "127.0.0.1", "--port", str(self.agent_port),
-             "--etc", self.etc, "--ollama", f"http://127.0.0.1:{self.ollama_port}"],
+             "--etc", self.etc, "--ollama", f"http://127.0.0.1:{self.ollama_port}"] + extra,
             env=env)
         self._wait_port(self.agent_port)
 
@@ -229,6 +242,60 @@ class FakeMachine:
         srv.daemon_threads = True
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         return srv
+
+    def _serve_llama(self) -> str:
+        machine = self
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _json(self, payload, code=200):
+                body = json.dumps(payload).encode()
+                self.send_response(code)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                machine.llama_requests.append(self.path)
+                if self.path == "/models?reload=1":
+                    for f in os.listdir(machine.llama_models):
+                        if f.endswith(".gguf"):
+                            machine.llama.setdefault(f[:-5], ["unloaded", False])
+                if not self.path.startswith("/models"):
+                    self._json({}, 404)
+                    return
+                data = []
+                for name, (value, failed) in machine.llama.items():
+                    status = {"value": value, "args": ["llama-server", "--model",
+                                                       os.path.join(machine.llama_models, name + ".gguf")]}
+                    if failed:
+                        status["failed"] = True
+                    data.append({"id": name, "status": status, "architecture": {
+                        "input_modalities": ["text", "image"] if name == "qwen-9b" else ["text"]}})
+                self._json({"data": data})
+
+            def do_POST(self):
+                name = json.loads(self.rfile.read(int(self.headers["Content-Length"])))["model"]
+                machine.llama_requests.append(self.path + " " + name)
+                if name not in machine.llama:
+                    self._json({"error": {"message": "model is not found"}}, 404)
+                elif self.path == "/models/load":
+                    machine.llama[name] = ["loading", False]
+                    after = ["unloaded", True] if name.startswith("fail") else ["loaded", False]
+                    threading.Timer(0.3, machine.llama.__setitem__, (name, after)).start()
+                    self._json({"success": True})
+                elif self.path == "/models/unload":
+                    machine.llama[name] = ["unloaded", False]
+                    self._json({"success": True})
+                else:
+                    self._json({}, 404)
+
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        srv.daemon_threads = True
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        return f"http://127.0.0.1:{srv.server_address[1]}"
 
     def _start_tls(self) -> None:
         self.cert = os.path.join(self.dir, "cert.pem")

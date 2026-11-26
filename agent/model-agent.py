@@ -2,17 +2,21 @@
 """model-agent: start, stop, download and monitor local AI models (stdlib only).
 
 Runs on the GPU machine and answers the Pi Hub ``model-hub`` plugin over HTTP
-with a Bearer token.  It knows two kinds of things:
+with a Bearer token.  It knows three kinds of things:
 
-* every Ollama model, found through the Ollama API;
+* every Ollama model, found through the Ollama API (``--ollama off`` without one);
+* every model of a llama.cpp router (``llama-server --models-dir``), with
+  ``--llama URL``; ``--llama-models DIR`` makes its folder a download target;
 * every *engine*: one JSON file per engine in ``engines.d/``.  An engine is a
   systemd unit or a command, of any type (image, audio, video, ...), so a new
   one needs a new file and no code.  See ``engines.example/`` in the plugin.
 
 Engines marked ``exclusive`` need the whole GPU: starting one stops Ollama and
-every other exclusive engine; stopping the last one brings Ollama back.
+every other exclusive engine and unloads llama.cpp models; stopping the last one
+brings Ollama back.
 
 Usage: model-agent.py --bind IP [--port 9872] [--etc /etc/model-agent]
+       [--ollama URL|off] [--llama URL] [--llama-models DIR]
 """
 from __future__ import annotations
 
@@ -34,7 +38,7 @@ import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.1.1"
+VERSION = "1.3.0"
 MAX_BODY = 64 * 1024
 MAX_FINISHED_JOBS = 30
 MAX_DOWNLOADS = 3
@@ -48,6 +52,7 @@ TYPE_RE = re.compile(r"[a-z0-9][a-z0-9 _-]{0,23}")
 UNIT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9@._-]{0,120}\.service")
 OLLAMA_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}")
 FILENAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,199}")
+HF_HOSTS = ("huggingface.co", "hf.co")
 #: Units the dashboard form may never take over: stopping one locks you out.
 PROTECTED_UNIT_RE = re.compile(
     r"(ollama|model-agent|ssh|sshd|tailscaled|dbus|docker|containerd|networking"
@@ -341,6 +346,8 @@ class OllamaView:
         return self.capabilities[key]
 
     def snapshot(self) -> dict:
+        if not args.ollama:
+            return {"up": False, "version": "", "models": [], "loaded": {}}
         try:
             tags = ollama_json("/api/tags")
             loaded = {m.get("name"): m for m in ollama_json("/api/ps").get("models") or []}
@@ -408,6 +415,115 @@ def load_ollama_model(name: str, capabilities: list[str]) -> None:
         except OSError as exc:
             last = str(exc)
     raise AgentError(f"Could not load {name}: {last}", 500)
+
+
+# ── llama.cpp router ────────────────────────────────────────────────────────
+
+LLAMA_STATES = {"loaded": "running", "loading": "starting", "downloading": "starting"}
+
+
+def llama_json(path: str, body: dict | None = None, timeout: float = 4) -> dict:
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(
+        args.llama + path, data=data,
+        headers={"Content-Type": "application/json"} if data else {})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.load(resp)
+    except urllib.error.HTTPError as exc:
+        try:
+            message = json.loads(exc.read())["error"]["message"]
+        except (ValueError, KeyError, TypeError, OSError):
+            message = f"HTTP {exc.code}"
+        raise AgentError(f"llama.cpp: {message}", 500)
+
+
+def model_file_size(argv: list) -> int:
+    try:
+        return os.path.getsize(argv[argv.index("--model") + 1])
+    except (ValueError, IndexError, OSError, TypeError):
+        return 0
+
+
+class LlamaView:
+    """Last known router models, so the list survives while the router is down."""
+
+    def __init__(self) -> None:
+        self.models: list[dict] = []
+
+    def snapshot(self) -> dict:
+        if not args.llama:
+            return {"up": False, "models": []}
+        try:
+            data = llama_json("/models")["data"]
+        except (OSError, ValueError, KeyError, TypeError, AgentError):
+            for m in self.models:
+                m["state"] = "unavailable"
+            return {"up": False, "models": self.models}
+        models = []
+        for m in data:
+            status = m.get("status") or {}
+            state = LLAMA_STATES.get(status.get("value"), "stopped")
+            if state == "stopped" and status.get("failed"):
+                state = "failed"
+            inputs = (m.get("architecture") or {}).get("input_modalities") or []
+            models.append({"name": str(m.get("id") or ""), "state": state,
+                           "size": model_file_size(status.get("args") or []),
+                           "vision": "image" in inputs})
+        self.models = models
+        return {"up": True, "models": models}
+
+    def state(self, name: str) -> str:
+        return next((m["state"] for m in self.snapshot()["models"]
+                     if m["name"] == name), "missing")
+
+    def loaded(self) -> list[str]:
+        return [m["name"] for m in self.snapshot()["models"]
+                if m["state"] in ACTIVE_STATES]
+
+
+llama_view = LlamaView()
+
+
+def llama_unload(name: str) -> None:
+    llama_json("/models/unload", {"model": name}, 30)
+    deadline = time.time() + 60
+    while time.time() < deadline and llama_view.state(name) in ACTIVE_STATES:
+        time.sleep(0.5)
+
+
+def start_llama_model(job: dict, name: str) -> None:
+    engines, _ = catalog.load()
+    for engine in active_exclusive(engine_states(engines), engines):
+        jobs.update(job, message=f"Stopping {engine['name']}")
+        stop_engine_unit(engine)
+    jobs.update(job, message="Loading into memory")
+    llama_json("/models/load", {"model": name}, 30)
+    t0 = time.time()
+    while time.time() < t0 + LOAD_TIMEOUT_S:
+        state = llama_view.state(name)
+        if state == "running":
+            jobs.finish(job, "done", "Loaded")
+            return
+        if state == "failed" or (state != "starting" and time.time() > t0 + 5):
+            raise AgentError(f"Could not load {name}; see journalctl -u llama", 500)
+        time.sleep(1)
+    raise AgentError(f"{name} not loaded after {LOAD_TIMEOUT_S} s", 500)
+
+
+def stop_llama_model(job: dict, name: str) -> None:
+    jobs.update(job, message="Unloading")
+    llama_unload(name)
+    jobs.finish(job, "done", "Unloaded")
+
+
+def llama_rescan() -> None:
+    """Let the router pick up a new file in its models folder."""
+    if args.llama:
+        try:
+            llama_json("/models?reload=1", timeout=15)
+        except (OSError, ValueError, AgentError):
+            pass
 
 
 # ── Jobs ────────────────────────────────────────────────────────────────────
@@ -503,9 +619,9 @@ def active_exclusive(states: dict[str, str], engines: dict[str, dict],
 
 
 def conflicts_for(item_id: str, engines: dict[str, dict],
-                  states: dict[str, str], loaded: dict) -> list[str]:
+                  states: dict[str, str], loaded) -> list[str]:
     """Names of what starting *item_id* would interrupt."""
-    if item_id.startswith("ollama:"):
+    if item_id.startswith(("ollama:", "llama:")):
         return [e["name"] for e in active_exclusive(states, engines)]
     eid = item_id[len("engine:"):]
     engine = engines.get(eid)
@@ -522,6 +638,8 @@ def stop_engine_unit(engine: dict) -> None:
 
 
 def restore_ollama_if_free() -> None:
+    if not args.ollama:
+        return
     engines, _ = catalog.load()
     if not active_exclusive(engine_states(engines), engines):
         run(["systemctl", "--no-block", "start", "ollama.service"], timeout=20)
@@ -561,8 +679,12 @@ def start_engine(job: dict, engine: dict) -> None:
         for other in active_exclusive(engine_states(engines), engines, skip=engine["id"]):
             jobs.update(job, message=f"Stopping {other['name']}")
             stop_engine_unit(other)
-        jobs.update(job, message="Stopping Ollama")
-        run(["systemctl", "stop", "ollama.service"], timeout=60)
+        if args.ollama:
+            jobs.update(job, message="Stopping Ollama")
+            run(["systemctl", "stop", "ollama.service"], timeout=60)
+        for name in llama_view.loaded():
+            jobs.update(job, message=f"Unloading {name}")
+            llama_unload(name)
     jobs.update(job, message="Starting")
     res = launch_unit(engine)
     if res.returncode != 0:
@@ -624,12 +746,17 @@ def stop_engine(job: dict, engine: dict) -> None:
 
 
 def resolve(item_id: str) -> tuple[str, object]:
-    """Map an item id to ("ollama", name) or ("engine", engine dict)."""
+    """Map an item id to ("ollama"|"llama", name) or ("engine", engine dict)."""
     if item_id.startswith("ollama:"):
         name = item_id[len("ollama:"):]
         if not OLLAMA_NAME_RE.fullmatch(name):
             raise AgentError("Invalid model name")
         return "ollama", name
+    if item_id.startswith("llama:"):
+        name = item_id[len("llama:"):]
+        if not OLLAMA_NAME_RE.fullmatch(name):
+            raise AgentError("Invalid model name")
+        return "llama", name
     if item_id.startswith("engine:"):
         engines, _ = catalog.load()
         engine = engines.get(item_id[len("engine:"):])
@@ -645,7 +772,8 @@ def api_start(body: dict) -> dict:
     engines, _ = catalog.load()
     states = engine_states(engines)
     snap = ollama_view.snapshot()
-    conflicts = conflicts_for(item_id, engines, states, snap["loaded"])
+    conflicts = conflicts_for(item_id, engines, states,
+                              list(snap["loaded"]) + llama_view.loaded())
     if conflicts and not body.get("force"):
         raise AgentError("This stops: " + ", ".join(conflicts), 409, conflicts=conflicts)
     if not switch_lock.acquire(blocking=False):
@@ -655,6 +783,9 @@ def api_start(body: dict) -> dict:
                      if m["name"] == target), [])
         job = jobs.create("start", str(target))
         spawn(job, start_ollama_model, target, caps, lock=switch_lock)
+    elif kind == "llama":
+        job = jobs.create("start", str(target))
+        spawn(job, start_llama_model, target, lock=switch_lock)
     else:
         job = jobs.create("start", target["name"])
         spawn(job, start_engine, target, lock=switch_lock)
@@ -668,6 +799,9 @@ def api_stop(body: dict) -> dict:
     if kind == "ollama":
         job = jobs.create("stop", str(target))
         spawn(job, stop_ollama_model, target, lock=switch_lock)
+    elif kind == "llama":
+        job = jobs.create("stop", str(target))
+        spawn(job, stop_llama_model, target, lock=switch_lock)
     else:
         job = jobs.create("stop", target["name"])
         spawn(job, stop_engine, target, lock=switch_lock)
@@ -719,6 +853,10 @@ def download_file(job: dict, url: str, directory: str, filename: str) -> None:
     if offset:
         headers["Range"] = f"bytes={offset}-"
     req = urllib.request.Request(url, headers=headers)
+    token = hf_token() if urllib.parse.urlsplit(url).hostname in HF_HOSTS else ""
+    if token:
+        # Unredirected: the signed CDN URL Hugging Face redirects to must not get it.
+        req.add_unredirected_header("Authorization", f"Bearer {token}")
     try:
         resp = urllib.request.urlopen(req, timeout=60)
     except urllib.error.HTTPError as exc:
@@ -755,11 +893,21 @@ def download_file(job: dict, url: str, directory: str, filename: str) -> None:
     if total and done != total:
         raise AgentError("Connection closed early, retry to resume", 500)
     os.replace(part, final)
+    if directory == args.llama_models:
+        llama_rescan()
     jobs.finish(job, "done", "Downloaded")
+
+
+def hf_token() -> str:
+    return (os.environ.get("HF_TOKEN")
+            or read_text(os.path.expanduser("~/.cache/huggingface/token")) or "")
 
 
 def all_targets(engines: dict[str, dict]) -> dict[str, dict]:
     targets = {}
+    if args.llama_models:
+        targets["llama"] = {"id": "llama", "engine": "llama.cpp", "label": "Models",
+                            "path": args.llama_models}
     for e in engines.values():
         for i, t in enumerate(e["targets"]):
             targets[f"{e['id']}:{i}"] = {"id": f"{e['id']}:{i}", "engine": e["name"],
@@ -781,6 +929,8 @@ def api_download(body: dict) -> dict:
         name = str(body.get("name") or "").strip()
         if not OLLAMA_NAME_RE.fullmatch(name):
             raise AgentError("Invalid Ollama model name")
+        if not args.ollama:
+            raise AgentError("Ollama is not set up on this machine", 409)
         if not tcp_open(*ollama_address()):
             raise AgentError("Ollama is stopped. Stop the running engine first.", 409)
         if any(j["label"] == name for j in active):
@@ -791,6 +941,9 @@ def api_download(body: dict) -> dict:
 
     if kind == "file":
         url = str(body.get("url") or "").strip()
+        # The link a browser shows on Hugging Face is the page; /resolve/ is the file.
+        url = re.sub(r"^(https://(?:huggingface\.co|hf\.co)/[^/]+/[^/]+)/blob/",
+                     r"\1/resolve/", url)
         parts = urllib.parse.urlsplit(url)
         if parts.scheme != "https" or not parts.hostname or parts.username:
             raise AgentError("The URL must start with https://")
@@ -939,7 +1092,7 @@ def mountpoint(path: str) -> str:
 
 
 def disks(engines: dict[str, dict]) -> list[dict]:
-    paths = {"/"}
+    paths = {"/", args.llama_models} - {""}
     for e in engines.values():
         paths.update(t["path"] for t in e["targets"])
         paths.update(e["models_dirs"])
@@ -956,6 +1109,9 @@ def build_status() -> dict:
     engines, errors = catalog.load()
     states = engine_states(engines)
     snap = ollama_view.snapshot()
+    llama = llama_view.snapshot()
+    in_memory = list(snap["loaded"]) + [m["name"] for m in llama["models"]
+                                        if m["state"] in ACTIVE_STATES]
     items = []
 
     for m in snap["models"]:
@@ -972,7 +1128,16 @@ def build_status() -> dict:
             "tags": [c for c in m["capabilities"] if c in ("vision", "tools", "thinking")],
             "vram": (loaded or {}).get("size_vram"),
             "until": (loaded or {}).get("expires_at"),
-            "conflicts": conflicts_for(item_id, engines, states, snap["loaded"]),
+            "conflicts": conflicts_for(item_id, engines, states, in_memory),
+        })
+
+    for m in llama["models"]:
+        item_id = "llama:" + m["name"]
+        items.append({
+            "id": item_id, "name": m["name"], "type": "text", "runtime": "llama.cpp",
+            "state": m["state"], "size": m["size"], "detail": "",
+            "tags": ["vision"] if m["vision"] else [],
+            "conflicts": conflicts_for(item_id, engines, states, in_memory),
         })
 
     for eid, e in engines.items():
@@ -988,7 +1153,7 @@ def build_status() -> dict:
             "detail": e["note"], "tags": [], "files": files,
             "has_model_dirs": bool(e["models_dirs"]), "url": e["url"],
             "port": e["port"], "removable": e["managed_by"] == "ui",
-            "conflicts": conflicts_for(item_id, engines, states, snap["loaded"]),
+            "conflicts": conflicts_for(item_id, engines, states, in_memory),
         })
 
     active_engine = next((engines[eid]["name"] for eid, s in states.items()
@@ -1001,7 +1166,9 @@ def build_status() -> dict:
                 "cores": os.cpu_count()},
         "ram": memory(),
         "disks": disks(engines),
-        "ollama": {"up": snap["up"], "version": snap["version"]},
+        "ollama": {"enabled": bool(args.ollama), "up": snap["up"],
+                   "version": snap["version"]},
+        "llama": {"enabled": bool(args.llama), "up": llama["up"]},
         "active_engine": active_engine,
         "items": items,
         "jobs": jobs.list(),
@@ -1097,9 +1264,15 @@ def main() -> None:
     parser.add_argument("--bind", required=True)
     parser.add_argument("--port", type=int, default=9872)
     parser.add_argument("--etc", default="/etc/model-agent")
-    parser.add_argument("--ollama", default="http://127.0.0.1:11434")
+    parser.add_argument("--ollama", default="http://127.0.0.1:11434",
+                        help="Ollama API, or off")
+    parser.add_argument("--llama", default="", help="llama.cpp router URL")
+    parser.add_argument("--llama-models", default="",
+                        help="the router's --models-dir, offered as download folder")
     args = parser.parse_args()
-    args.ollama = args.ollama.rstrip("/")
+    args.ollama = "" if args.ollama == "off" else args.ollama.rstrip("/")
+    args.llama = args.llama.rstrip("/")
+    args.llama_models = args.llama_models.rstrip("/")
     args.token = (read_text(os.path.join(args.etc, "token")) or "").strip()
     if len(args.token) < 16:
         raise SystemExit(f"missing or short token in {args.etc}/token")

@@ -8,7 +8,7 @@
   var TYPE_ORDER = ['text', 'image', 'video', 'audio', 'embedding'];
   var STATE_LABEL = {
     running: 'Running', starting: 'Starting', stopping: 'Stopping',
-    stopped: 'Stopped', failed: 'Failed', unavailable: 'Ollama is stopped'
+    stopped: 'Stopped', failed: 'Failed'
   };
   // What the badge next to each name says: can I use this model right now?
   var PHASE_LABEL = {
@@ -308,6 +308,7 @@
     var job = jobFor(item);
     var state = [];
     if (job) state.push(job.message || 'Working');
+    else if (item.state === 'unavailable') state.push(item.runtime + ' is stopped');
     else if (p !== 'ready' && p !== 'off') state.push(STATE_LABEL[item.state] || item.state);
     if (item.vram) state.push(bytes(item.vram) + ' on GPU');
     if (p === 'ready') state.push(unloadsIn(item));
@@ -376,6 +377,7 @@
   [['ollama', 'Ollama model'], ['file', 'File from URL']].forEach(function (o) {
     var opt = el('option', '', o[1]); opt.value = o[0]; kind.appendChild(opt);
   });
+  var ollamaOpt = kind.firstChild;
   var source = el('input');
   source.spellcheck = false;
   source.setAttribute('aria-label', 'Model name or URL');
@@ -456,7 +458,7 @@
   // ── Add an engine ─────────────────────────────────────────────────────
   var add = el('details', 'panel');
   add.appendChild(el('summary', '', 'Add an engine'));
-  add.appendChild(el('p', 'line', 'Anything that runs as a systemd service on the PC. Ollama models and files in known folders appear on their own.'));
+  add.appendChild(el('p', 'line', 'Anything that runs as a systemd service on the PC. Ollama and llama.cpp models and files in known folders appear on their own.'));
   function field(placeholder, label) {
     var i = el('input');
     i.placeholder = placeholder;
@@ -546,11 +548,18 @@
     offline.style.display = 'none';
     main.style.display = '';
 
-    var messages = [];
+    var messages = [], warn = false;
+    var ollamaOn = d.ollama.enabled !== false, llama = d.llama || {};
     if (d.active_engine) messages.push(d.active_engine + ' holds the GPU');
-    else if (!d.ollama.up) messages.push('Ollama is stopped');
+    else if (ollamaOn && !d.ollama.up) { messages.push('Ollama is stopped'); warn = true; }
+    if (llama.enabled && !llama.up) { messages.push('llama.cpp is not answering'); warn = true; }
     notice.textContent = messages.join(' · ');
-    notice.className = 'line' + (!d.ollama.up && !d.active_engine ? ' warn' : '');
+    notice.className = 'line' + (warn ? ' warn' : '');
+    // Without Ollama on the PC its download option would only ever fail.
+    if (ollamaOn !== (ollamaOpt.parentNode === kind)) {
+      if (ollamaOn) kind.insertBefore(ollamaOpt, kind.firstChild); else kind.removeChild(ollamaOpt);
+      syncKind();
+    }
     (d.catalog_errors || []).forEach(function (err) {
       var p = el('p', 'line bad', 'Engine file skipped: ' + err);
       notice.appendChild(document.createElement('br'));

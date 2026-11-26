@@ -34,7 +34,7 @@ ENGINES = {
     "bad-file": {"name": "No unit", "type": "image"},
 }
 
-m = FakeMachine(ENGINES)
+m = FakeMachine(ENGINES, llama=True)
 try:
     target_spec = {"name": "Files", "type": "misc", "unit": "files.service",
                    "models_dirs": [m.downloads],
@@ -57,7 +57,7 @@ try:
     check("new type is lowercased and free-form", items["engine:slow"]["type"] == "video")
     check("bad engine file is reported, not fatal",
           any("bad-file" in e for e in st["catalog_errors"]) and "engine:bad-file" not in items)
-    check("download target exposed", st["targets"][0]["label"] == "Models")
+    check("download target exposed", any(t["id"] == "files:0" for t in st["targets"]))
 
     # Hot-add through a plain file
     m.write_engine("3d-gen", {"name": "3D Gen", "type": "3d", "unit": "gen3d.service"})
@@ -218,7 +218,7 @@ try:
     check("pull cancelled", m.wait_job(res["job"])["state"] == "cancelled")
 
     # File download
-    tid = m.status()["targets"][0]["id"]
+    tid = "files:0"
     url = m.https + "/org/repo/resolve/main/model.gguf"
     code, res = m.call("POST", "/download", {"kind": "file", "url": url, "target": tid})
     job = m.wait_job(res["job"])
@@ -266,6 +266,45 @@ try:
     ):
         check(label, m.call("POST", "/download", body)[0] == 400)
 
+    # llama.cpp router beside Ollama
+    code, res = m.call("POST", "/models/start", {"id": "ollama:llama3.1:8b", "force": True})
+    m.wait_job(res["job"])
+    llama_item = m.item("llama:qwen-9b")
+    check("llama model listed", llama_item["runtime"] == "llama.cpp" and llama_item["state"] == "stopped")
+    check("llama vision tag from input modalities", llama_item["tags"] == ["vision"])
+    code, res = m.call("POST", "/models/start", {"id": "llama:qwen-9b"})
+    check("llama model loads", code == 200 and m.wait_job(res["job"])["state"] == "done", res)
+    check("llama model running", m.item("llama:qwen-9b")["state"] == "running")
+    check("ollama model untouched by llama load", m.item("ollama:llama3.1:8b")["state"] == "running")
+    code, res = m.call("POST", "/models/start", {"id": "llama:fail-big"})
+    job = m.wait_job(res["job"])
+    check("failed llama load reported", job["state"] == "error" and "fail-big" in job["message"], job)
+    check("failed llama model shows failed", m.item("llama:fail-big")["state"] == "failed")
+    code, res = m.call("POST", "/models/start", {"id": "engine:comfy"})
+    check("exclusive engine lists the llama model", code == 409 and "qwen-9b" in res["conflicts"], res)
+    code, res = m.call("POST", "/models/start", {"id": "engine:comfy", "force": True})
+    check("exclusive engine starts", m.wait_job(res["job"])["state"] == "done")
+    check("exclusive engine unloaded the llama model", m.item("llama:qwen-9b")["state"] == "stopped")
+    code, res = m.call("POST", "/models/start", {"id": "llama:qwen-9b"})
+    check("llama start asks before stopping the engine", code == 409 and res["conflicts"] == ["ComfyUI"], res)
+    code, res = m.call("POST", "/models/start", {"id": "llama:qwen-9b", "force": True})
+    check("llama start stops the engine", m.wait_job(res["job"])["state"] == "done"
+          and not m.is_active("comfy.service"))
+    code, res = m.call("POST", "/models/stop", {"id": "llama:qwen-9b"})
+    check("llama model unloads", m.wait_job(res["job"])["state"] == "done"
+          and m.item("llama:qwen-9b")["state"] == "stopped")
+    check("unknown llama model", m.call("POST", "/models/stop", {"id": "llama:a;b"})[0] == 400)
+
+    st = m.status()
+    check("llama folder offered as download target",
+          any(t["id"] == "llama" and t["path"] == m.llama_models for t in st["targets"]))
+    check("llama reported", st["llama"] == {"enabled": True, "up": True})
+    code, res = m.call("POST", "/download", {"kind": "file", "target": "llama",
+                                             "url": m.https + "/org/repo/resolve/main/new-4b.gguf"})
+    check("gguf downloaded into the llama folder", m.wait_job(res["job"])["state"] == "done")
+    check("router rescanned after the download", "/models?reload=1" in m.llama_requests)
+    check("downloaded model appears in the list", m.item("llama:new-4b")["state"] == "stopped")
+
     # Adding engines from the dashboard
     m.add_unit("whisper.service")
     for label, body, want in (
@@ -293,6 +332,22 @@ try:
     check("stopped engine removed", m.call("DELETE", "/engines/whisper-stt")[0] == 200)
     check("gone from list", all(i["id"] != "engine:whisper-stt" for i in m.status()["items"]))
 
+finally:
+    m.close()
+
+# A machine with only a llama.cpp router: Ollama off
+m = FakeMachine({"comfy": ENGINES["comfy"]}, ollama=False, llama=True)
+try:
+    st = m.status()
+    check("ollama off reported", st["ollama"]["enabled"] is False)
+    check("no ollama items without ollama", all(not i["id"].startswith("ollama:") for i in st["items"]))
+    check("ollama download refused without ollama",
+          m.call("POST", "/download", {"kind": "ollama", "name": "x:latest"})[0] == 409)
+    code, res = m.call("POST", "/models/start", {"id": "engine:comfy"})
+    m.wait_job(res["job"])
+    code, res = m.call("POST", "/models/stop", {"id": "engine:comfy"})
+    m.wait_job(res["job"])
+    check("ollama service left alone when off", "ollama" not in m.log(), m.log())
     print(f"\nAll {PASS} checks passed")
 finally:
     m.close()

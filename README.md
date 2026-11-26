@@ -5,20 +5,33 @@ hardware, download new ones. Text, image, audio, video or anything else.
 
 ## What it does
 
-- **All models in one list**, filterable by type. Ollama models appear on their
-  own; everything else is an *engine* (below).
+- **All models in one list**, filterable by type. Ollama models and the models
+  of a llama.cpp router appear on their own; everything else is an *engine*
+  (below).
 - **Start and stop** with one click. If something else holds the GPU, the first
   click says what will be stopped and the second click does it. Stopping the
   last GPU engine brings Ollama back.
 - **Monitor** video memory, GPU load, temperature, power, CPU, memory, disk.
-- **Download** Ollama models by name, or any file over https into a folder an
-  engine declares, with progress, cancel and resume.
+- **Download** Ollama models by name, or any file over https (a GGUF from
+  Hugging Face, for example) into the llama.cpp models folder or a folder an
+  engine declares, with progress, cancel and resume. Gated Hugging Face files use
+  the token in `~/.cache/huggingface/token` or `HF_TOKEN` on the GPU machine.
 - **Wake** the machine when it is off.
 
 ## Install
 
-1. On the GPU machine: `sudo ./agent/install.sh <bind-ip> [engines-dir]`.
+1. On the GPU machine: `sudo ./agent/install.sh <bind-ip> [engines-dir] ["agent args"]`.
    Use a LAN or VPN address. The token is in `/etc/model-agent/token`.
+   Agent arguments for the model runtimes:
+
+   | Argument | Default | Meaning |
+   |---|---|---|
+   | `--ollama URL` | `http://127.0.0.1:11434` | Ollama API; `off` when there is no Ollama. |
+   | `--llama URL` | off | llama.cpp router (`llama-server --models-dir ...`). |
+   | `--llama-models DIR` | none | The router's models folder, offered as a download folder. |
+
+   Example with only llama.cpp:
+   `sudo ./agent/install.sh 10.0.0.5 "" "--ollama off --llama http://127.0.0.1:11434 --llama-models /opt/models"`
 2. In Pi Hub: add this repository under **Settings → Plugins**, install and
    enable it, and approve `ui.frame` and `hosts.wake`.
 3. **Configure**: agent URL `http://<bind-ip>:9872`, the token, and the Pi Hub
@@ -40,6 +53,7 @@ Timing changes apply immediately. Requires Pi Hub 8.3.0.
 | New thing | What to do |
 |---|---|
 | Ollama model | Download it in the tab. It appears by itself. |
+| llama.cpp model | Download the GGUF into **llama.cpp · Models**. It appears by itself. Per-model settings go into the router's presets file. |
 | Model file for an engine | Download it in the tab, or copy it into one of the engine's `models_dirs`. |
 | A systemd service | **Add an engine** in the tab: name, type, service. |
 | A plain command | One JSON file in `/etc/model-agent/engines.d/`. |

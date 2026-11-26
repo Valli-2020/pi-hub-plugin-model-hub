@@ -41,7 +41,7 @@ def main() -> None:
     machine = None
     if agent_url == "fake":
         from fakes import TOKEN, FakeMachine
-        machine = FakeMachine()
+        machine = FakeMachine(llama=True)
         for eid, spec in fake_engines(machine.downloads).items():
             machine.write_engine(eid, spec)
         machine.write_engine("files", {

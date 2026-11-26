@@ -33,7 +33,7 @@ async function overflow(frame) {
 const a = await open(ADMIN, { viewport: { width: 1280, height: 900 }, colorScheme: 'dark' });
 await a.frame.locator('.tile').first().waitFor();
 check('five monitor tiles', await a.frame.locator('.tile').count() === 5);
-for (const n of ['llama3.1:8b', 'embeddinggemma:latest', 'ComfyUI', 'S2 Pro TTS'])
+for (const n of ['llama3.1:8b', 'embeddinggemma:latest', 'qwen-9b', 'ComfyUI', 'S2 Pro TTS'])
   check('listed: ' + n, await row(a.frame, n).count() === 1);
 const chipText = await a.frame.locator('.chips').innerText();
 for (const t of ['All', 'Text', 'Image', 'Video', 'Audio', 'Embedding'])
@@ -51,6 +51,11 @@ check('model started from the button', (await row(a.frame, 'llama3.1').innerText
 await row(a.frame, 'llama3.1').locator('.badge', { hasText: 'Ready' }).waitFor({ timeout: 8000 });
 check('loaded model shows the Ready badge', true);
 check('unloaded model shows Not loaded', (await row(a.frame, 'embeddinggemma').locator('.badge').innerText()) === 'Not loaded');
+
+// A llama.cpp model loads beside it
+await row(a.frame, 'qwen-9b').locator('.btn.go').click();
+await row(a.frame, 'qwen-9b').locator('.badge', { hasText: 'Ready' }).waitFor({ timeout: 10000 });
+check('llama.cpp model started from the button', (await row(a.frame, 'qwen-9b').innerText()).includes('llama.cpp'));
 
 // Engine needs a second click, and says why
 await row(a.frame, 'ComfyUI').locator('.btn.go').click();
@@ -80,7 +85,8 @@ check('download finishes', true);
 
 await a.frame.locator('.panel select').first().selectOption('file');
 check('file mode shows a folder picker', await a.frame.locator('.panel select').nth(1).isVisible());
-check('folder picker lists targets', (await a.frame.locator('.panel select').nth(1).innerText()).includes('Video engine'));
+const folders = await a.frame.locator('.panel select').nth(1).innerText();
+check('folder picker lists targets', folders.includes('Video engine') && folders.includes('llama.cpp · Models'), folders);
 await a.frame.locator('.form input').first().fill('http://bad.example/x');
 await a.frame.locator('.btn.primary', { hasText: 'Download' }).click();
 await a.frame.locator('.alert', { hasText: 'must start with https' }).waitFor({ timeout: 6000 });
